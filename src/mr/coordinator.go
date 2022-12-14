@@ -1,31 +1,75 @@
 package mr
 
-import "log"
+import (
+	"errors"
+	"log"
+	"sync"
+)
 import "net"
 import "os"
 import "net/rpc"
 import "net/http"
 
+type TaskState string
+
+const (
+	StateUnStarted  = "UnStarted"
+	StateProcessing = "Processing"
+	StateFinished   = "Finished"
+)
+
+type MapTask struct {
+	file  string
+	state TaskState
+}
+
 type Coordinator struct {
 	// Your definitions here.
-	nReduce    int
-	inputFiles []string
-	workers    []string
+	nReduce          int
+	files            []string
+	unStartedTasks   []string
+	finishedTasks    map[string]bool
+	processingTasks  []string
+	mapTaskNumber    int
+	reduceTaskNumber int
+	lock             sync.Mutex
+}
+
+func newMapTask(file string) MapTask {
+	return MapTask{
+		file:  file,
+		state: StateUnStarted,
+	}
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
+// RequestMapTask mapper request map task
+func (c *Coordinator) RequestMapTask(args *MapTaskArgs, reply *MapTaskReply) error {
+	c.lock.Lock()
+	if len(c.unStartedTasks) == 0 {
+		return errors.New("no tasks")
+	}
+	taskNumber := c.mapTaskNumber
+	unStartedTask := c.unStartedTasks[0]
+	c.unStartedTasks = c.unStartedTasks[1:]
+	c.processingTasks = append(c.processingTasks, reply.File)
+	c.mapTaskNumber++
+	c.lock.Unlock()
+
+	reply.TaskNumber = taskNumber
+	reply.File = unStartedTask
+	reply.NReduce = c.nReduce
 	return nil
 }
 
-// Map worker request task from coordinator
-func (c *Coordinator) Map() error {
+// SubmitMapResult mapper pass back map phase's result to coordinator
+func (c *Coordinator) SubmitMapResult(args *MapResultArgs, reply *MapResultReply) error {
 	return nil
+}
+
+func (c *Coordinator) setFinished() {
+
 }
 
 // start a thread that listens for RPCs from worker.go
@@ -59,8 +103,11 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
 	// Your code here.
-	c.inputFiles = files
+	c.files = files
 	c.nReduce = nReduce
+	c.unStartedTasks = files
+	c.finishedTasks = make(map[string]bool)
+	c.processingTasks = []string{}
 
 	c.server()
 	return &c

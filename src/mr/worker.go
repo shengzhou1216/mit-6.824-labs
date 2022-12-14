@@ -1,6 +1,10 @@
 package mr
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
@@ -27,40 +31,80 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// uncomment to send the Example RPC to the coordinator.
 	//CallExample()
+	mapTaskReply, err := RequestMapTask()
+	if err != nil {
+		fmt.Printf("Request map task err: %s\n", err)
+		return
+	}
+	fmt.Printf("Map task reply: %v\n", mapTaskReply)
+	// read file content
+	content, err := os.ReadFile(mapTaskReply.File)
+	if err != nil {
+		fmt.Printf("Read map task's file err: %s\n", err)
+		return
+	}
+	// map file
+	keyValues := mapf(mapTaskReply.File, string(content))
 
+	//store intermediate k/vs
+	x := mapTaskReply.TaskNumber
+	reduceTasks := map[int][]KeyValue{}
+	for _, kv := range keyValues {
+		y := ihash(kv.Key) % mapTaskReply.NReduce
+		reduceTasks[y] = append(reduceTasks[y], kv)
+	}
+	var reduceFiles []string
+	for y, kvs := range reduceTasks {
+		file, err := os.CreateTemp("", "mr-tmp-*")
+		if err != nil {
+			fmt.Printf("Create intermediate file err: %s\n", err)
+			return
+		}
+		enc := json.NewEncoder(file)
+		if err := enc.Encode(kvs); err != nil {
+			fmt.Printf("Write intermediate file err: %s\n", err)
+			return
+		}
+		file.Close()
+		reduceFile := fmt.Sprintf("mr-%d-%d", x, y)
+		if err := os.Rename(file.Name(), reduceFile); err != nil {
+			fmt.Printf("Rename intermediate file err: %s\n", err)
+			return
+		}
+		reduceFiles = append(reduceFiles, reduceFile)
+	}
+	// pass back map result to coordinator
+	result, err := SubmitMapResult(mapTaskReply.TaskNumber, reduceFiles)
+	if err != nil {
+		fmt.Printf("Submit map result err: %s\n", err)
+		return
+	}
+	fmt.Println(result)
 }
 
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func CallExample() {
+// RequestMapTask request for map task
+func RequestMapTask() (MapTaskReply, error) {
+	args := MapTaskArgs{}
+	reply := MapTaskReply{}
+	err := call("Coordinator.RequestMapTask", &args, &reply)
+	return reply, err
+}
 
-	// declare an argument structure.
-	args := ExampleArgs{}
-
-	// fill in the argument(s).
-	args.X = 99
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.Example", &args, &reply)
-	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Y %v\n", reply.Y)
-	} else {
-		fmt.Printf("call failed!\n")
+// SubmitMapResult pass back map phase's result to coordinator
+func SubmitMapResult(mapTaskNumber int, files []string) (MapResultReply, error) {
+	args := MapResultArgs{
+		Files:      files,
+		TaskNumber: mapTaskNumber,
 	}
+	reply := MapResultReply{}
+	err := call("Coordinator.SubmitMapResult", &args, &reply)
+	return reply, err
 }
 
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-func call(rpcname string, args interface{}, reply interface{}) bool {
+func call(rpcname string, args interface{}, reply interface{}) error {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
 	c, err := rpc.DialHTTP("unix", sockname)
@@ -69,11 +113,5 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	}
 	defer c.Close()
 
-	err = c.Call(rpcname, args, reply)
-	if err == nil {
-		return true
-	}
-
-	fmt.Println(err)
-	return false
+	return c.Call(rpcname, args, reply)
 }
